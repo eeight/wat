@@ -9,6 +9,8 @@
 #include <boost/lexical_cast.hpp>
 #include <boost/preprocessor/cat.hpp>
 
+#include <cxxabi.h>
+
 #include <iostream>
 #include <stdexcept>
 #include <memory>
@@ -42,6 +44,17 @@ int throwUnwindIfLessThan0(int ret) {
         throw std::runtime_error(unw_strerror(ret));
     }
     return ret;
+}
+
+std::string demangle(const std::string& str) {
+    int status;
+    char* demangled = __cxxabiv1::__cxa_demangle(
+            str.c_str(), nullptr, 0, &status);
+    if (status) {
+        return str;
+    }
+    SCOPE_EXIT(free(demangled));
+    return demangled;
 }
 
 void stacktrace(int pid) {
@@ -82,7 +95,7 @@ void stacktrace(int pid) {
         }
         std::cout << boost::format(
                 "%016lx %-32s + 0x%016lx (sp=%016lx)\n") %
-                ip % buf % off % sp;
+                ip % demangle(buf) % off % sp;
         if (++depth == 200) {
             break;
         }
