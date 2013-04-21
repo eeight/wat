@@ -21,6 +21,7 @@
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 int throwErrnoIfMinus1(int ret) {
     if (ret == -1) {
@@ -159,21 +160,17 @@ public:
         framesSeqence_.push_back(std::move(frames));
     }
 
-    std::vector<std::pair<int, Frame>> topFrames(size_t count) {
-        std::multimap<int, const Frame*> topFrames;
+    std::vector<std::pair<float, Frame>> topFrames(size_t count) {
+        std::vector<std::pair<float, Frame>> topFrames;
         for (const auto &kv: counts_) {
-            topFrames.emplace(kv.second, &kv.first);
+            topFrames.emplace_back(
+                    kv.second/static_cast<float>(width_), kv.first);
         }
-
-        std::vector<std::pair<int, Frame>> top;
-        for (auto i = topFrames.rbegin(); i != topFrames.rend(); ++i) {
-            top.emplace_back(i->first, *i->second);
-            if (top.size() == count) {
-                break;
-            }
+        std::sort(topFrames.rbegin(), topFrames.rend());
+        if (topFrames.size() > count) {
+            topFrames.erase(topFrames.begin() + count, topFrames.end());
         }
-
-        return top;
+        return topFrames;
     }
 
 private:
@@ -198,7 +195,7 @@ void liveProfile(int pid) {
     setSigintHandler();
 
     Wat wat(pid);
-    RunningStatistic stat(100);
+    RunningStatistic stat(1000);
     const int SAMPLING = 100;
     int iter = 0;
 
@@ -209,8 +206,8 @@ void liveProfile(int pid) {
             std::vector<std::string> lines;
             for (const auto &kv: stat.topFrames(30)) {
                 lines.push_back(str(boost::format(
-                        "%d 0x%x %s") %
-                            kv.first %
+                        "%6.2f%% 0x%x %s") %
+                            (kv.first*100) %
                             kv.second.ip %
                             abbrev(demangle(kv.second.procName))));
             }
