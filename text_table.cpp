@@ -9,7 +9,7 @@ public:
     }
 
     ~TextTable() {
-        endwin();
+        //endwin();
     }
 };
 

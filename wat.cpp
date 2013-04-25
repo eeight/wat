@@ -1,3 +1,5 @@
+#include "exception.h"
+#include "heartbeat.h"
 #include "scope.h"
 #include "symbols.h"
 #include "text_table.h"
@@ -23,32 +25,9 @@
 #include <utility>
 #include <vector>
 
-int throwErrnoIfMinus1(int ret) {
-    if (ret == -1) {
-        throw std::runtime_error(strerror(errno));
-    }
-    return ret;
-}
-
-int throwUnwindIfLessThan0(int ret) {
-    if (ret < 0) {
-        throw std::runtime_error(unw_strerror(ret));
-    }
-    return ret;
-}
-
-template <class T>
-T* throwUnwindIf0(T* ret) {
-    if (!ret) {
-        throw std::runtime_error("Unknown unwind error");
-    }
-    return ret;
-}
-
 struct Frame {
     unw_word_t ip;
     unw_word_t sp;
-    unw_word_t offset;
     std::string procName;
 
     bool operator <(const Frame& other) const {
@@ -96,17 +75,13 @@ public:
             throwUnwindIfLessThan0(unw_get_reg(&cursor, UNW_REG_IP, &ip));
             throwUnwindIfLessThan0(unw_get_reg(&cursor, UNW_REG_SP, &sp));
 
-            unw_word_t offset;
-            char procName[1024] = {0};
-            if (unw_get_proc_name(&cursor, procName, sizeof (procName), &offset) < 0) {
-                strcpy(procName, "{unknown}");
-            }
-            frames.push_back({ip, sp, offset, procName});
+            std::string procName = getProcName(&cursor);
+            frames.push_back({ip, sp, procName});
 
             if (++depth == 200) {
                 break;
             }
-        } while (throwUnwindIfLessThan0(unw_step(&cursor)));
+        } while (unw_step(&cursor) > 0);
 
         throwErrnoIfMinus1(ptrace(PTRACE_CONT, pid_, nullptr, nullptr));
         return frames;
@@ -195,14 +170,19 @@ void liveProfile(int pid) {
     setSigintHandler();
 
     Wat wat(pid);
+    Heartbeat hb(100);
     RunningStatistic stat(1000);
-    const int SAMPLING = 100;
     int iter = 0;
 
     while (!g_interrupted) {
+        hb.beat();
+        if (hb.skippedBeats() > 0) {
+            std::cerr << "Too slow, skipping " << hb.skippedBeats() <<
+                    " beats...\n";
+        }
         stat.pushFrames(wat.stacktrace());
-        usleep(1000000 / SAMPLING);
-        if (++iter % (SAMPLING / 10) == 0) {
+        usleep(hb.usecondsUntilNextBeat());
+        if (++iter % 10 == 0) {
             std::vector<std::string> lines;
             for (const auto &kv: stat.topFrames(30)) {
                 lines.push_back(str(boost::format(

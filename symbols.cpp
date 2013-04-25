@@ -1,5 +1,8 @@
+#include "exception.h"
 #include "symbols.h"
 #include "scope.h"
+
+#include <map>
 
 #include <cxxabi.h>
 
@@ -35,3 +38,26 @@ std::string abbrev(const std::string& name) {
     return result;
 }
 
+namespace {
+std::map<unw_word_t, std::string>* symbolsCache() {
+    static std::map<unw_word_t, std::string> symbols;
+    return &symbols;
+}
+} // namespace
+
+std::string getProcName(unw_cursor_t *cursor) {
+    unw_word_t ip;
+    throwUnwindIfLessThan0(unw_get_reg(cursor, UNW_REG_IP, &ip));
+
+    auto cache = symbolsCache();
+    auto iter = cache->find(ip);
+    if (iter == cache->end()) {
+        unw_word_t offset;
+        char procName[1024] = {0};
+        if (unw_get_proc_name(cursor, procName, sizeof(procName), &offset) < 0) {
+            strcpy(procName, "{unknown}");
+        }
+        iter = cache->emplace(ip, procName).first;
+    }
+    return iter->second;
+}
