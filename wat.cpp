@@ -2,10 +2,12 @@
 #include "heartbeat.h"
 #include "scope.h"
 #include "symbols.h"
-#include "text_table.h"
+#include "tracer.h"
 
 #include <signal.h>
+#include <string.h>
 #include <sys/ptrace.h>
+#include <sys/signalfd.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -16,24 +18,15 @@
 #include <boost/format.hpp>
 #include <boost/lexical_cast.hpp>
 
-#include <algorithm>
 #include <iostream>
-#include <map>
 #include <memory>
+#include <set>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
-struct Frame {
-    unw_word_t ip;
-    unw_word_t sp;
-    std::string procName;
-
-    bool operator <(const Frame& other) const {
-        return ip < other.ip;
-    }
-};
+using boost::filesystem::directory_iterator;
 
 class Wat {
 public:
@@ -43,26 +36,40 @@ public:
                     unw_create_addr_space(&_UPT_accessors, 0))),
             unwindInfo_(throwUnwindIf0(_UPT_create(pid)))
     {
-        throwErrnoIfMinus1(ptrace(PTRACE_ATTACH, pid, nullptr, nullptr));
-        requireTraceeStopped();
-        throwErrnoIfMinus1(ptrace(PTRACE_CONT, pid, nullptr, nullptr));
     }
 
     ~Wat() {
         unw_destroy_addr_space(addressSpace_);
-        _UPT_destroy(unwindInfo_);
-        // Cannot do anything if error occurs in dtor.
-        ptrace(PTRACE_DETACH, pid_, nullptr, nullptr);
+        if (unwindInfo_) {
+            _UPT_destroy(unwindInfo_);
+        }
     }
 
-    void detach() {
-        throwErrnoIfMinus1(ptrace(PTRACE_DETACH, pid_, nullptr, nullptr));
+    Wat(const Wat&) = delete;
+    void operator =(const Wat&) = delete;
+
+    Wat(Wat&& other) :
+        pid_(other.pid_),
+        addressSpace_(other.addressSpace_),
+        unwindInfo_(other.unwindInfo_)
+    {
+        other.addressSpace_ = nullptr;
+        other.unwindInfo_ = nullptr;
+    }
+
+    Wat& operator =(Wat&& other) {
+        if (this != &other) {
+            this->~Wat();
+            addressSpace_ = other.addressSpace_;
+            unwindInfo_ = other.unwindInfo_;
+            other.addressSpace_ = nullptr;
+            other.unwindInfo_ = nullptr;
+        }
+        return *this;
     }
 
     std::vector<Frame> stacktrace() {
         std::vector<Frame> frames;
-        throwErrnoIfMinus1(kill(pid_, SIGSTOP));
-        requireTraceeStopped();
 
         unw_cursor_t cursor;
         throwUnwindIfLessThan0(unw_init_remote(
@@ -83,115 +90,199 @@ public:
             }
         } while (unw_step(&cursor) > 0);
 
-        throwErrnoIfMinus1(ptrace(PTRACE_CONT, pid_, nullptr, nullptr));
         return frames;
     }
 
 private:
-    void requireTraceeStopped() {
-        int status;
-        throwErrnoIfMinus1(waitpid(pid_, &status, WUNTRACED | WCONTINUED));
-        if (WIFEXITED(status)) {
-            if (WTERMSIG(status)) {
-                throw std::runtime_error(str(boost::format(
-                            "Could not attach: process (pid = %d) "
-                            "is killed by signal %d.") %
-                        pid_ % WTERMSIG(status)));
-            }
-            throw std::runtime_error(str(boost::format(
-                        "Could not attach: process (pid = %d) "
-                        "has terminated normally") % pid_));
-        } else if (!WIFSTOPPED(status)) {
-            throw std::logic_error(str(boost::format(
-                        "Process (pid = %d) has neither been killed "
-                        "nor stopped. Status = %d") % pid_ % status));
-        }
-    }
-
     pid_t pid_;
     unw_addr_space_t addressSpace_;
     void *unwindInfo_;
 };
 
-class RunningStatistic {
-public:
-    explicit RunningStatistic(size_t width):
-            width_(width)
-    {}
+template <class F>
+void forallTids(pid_t pid, F f) {
+    for (directory_iterator i(str(
+                    boost::format("/proc/%d/task") % pid)), i_end;
+            i != i_end; ++i) {
+        if (!is_directory(i->status())) {
+            continue;
+        }
+        f(boost::lexical_cast<pid_t>(i->path().filename().string()));
+    }
+}
 
-    void pushFrames(std::vector<Frame> frames) {
-        if (framesSeqence_.size() == width_) {
-            for (const auto& frame: framesSeqence_.front()) {
-                auto iter = counts_.find(frame);
-                if (!--iter->second) {
-                    counts_.erase(iter);
-                }
+std::map<pid_t, Wat> attachAllThreads(pid_t pid) {
+    bool tracedSomething = true;
+    std::map<pid_t, Wat> wats;
+
+    while (tracedSomething) {
+        tracedSomething = false;
+        forallTids(pid, [&](pid_t tid) {
+            if (!wats.count(tid)) {
+                tracedSomething = true;
+                throwErrnoIfMinus1(
+                        ptrace(PTRACE_ATTACH, tid, nullptr, nullptr));
+                wats.emplace(tid, Wat(tid));
             }
-            framesSeqence_.pop_front();
-        }
-        for (const auto& frame: frames) {
-            ++counts_[frame];
-        }
-        framesSeqence_.push_back(std::move(frames));
+        });
     }
 
-    std::vector<std::pair<float, Frame>> topFrames(size_t count) {
-        std::vector<std::pair<float, Frame>> topFrames;
-        for (const auto &kv: counts_) {
-            topFrames.emplace_back(
-                    kv.second/static_cast<float>(width_), kv.first);
-        }
-        std::sort(topFrames.rbegin(), topFrames.rend());
-        if (topFrames.size() > count) {
-            topFrames.erase(topFrames.begin() + count, topFrames.end());
-        }
-        return topFrames;
+    return wats;
+}
+
+template <class Container>
+std::set<typename Container::key_type> keys(const Container& container) {
+    std::set<typename Container::key_type> keys;
+
+    for (const auto& kv: container) {
+        keys.insert(kv.first);
+    }
+
+    return keys;
+}
+
+enum class Loop: bool { NO, YES };
+
+class SignalIterator {
+public:
+    SignalIterator() {
+        sigset_t signals;
+        throwErrnoIfMinus1(sigemptyset(&signals));
+        throwErrnoIfMinus1(sigaddset(&signals, SIGCHLD));
+        throwErrnoIfMinus1(sigaddset(&signals, SIGALRM));
+        throwErrnoIfMinus1(sigaddset(&signals, SIGINT));
+        throwErrnoIfMinus1(sigprocmask(SIG_BLOCK, &signals, nullptr));
+        fd_ = throwErrnoIfMinus1(signalfd(-1, &signals, 0));
+    }
+
+    ~SignalIterator() {
+        while (close(fd_) == -1 && errno == EINTR);
+    }
+
+    int next() {
+        struct signalfd_siginfo sigInfo;
+        throwErrnoIfMinus1(read(fd_, &sigInfo, sizeof(sigInfo)));
+        return sigInfo.ssi_signo;
     }
 
 private:
-    std::list<std::vector<Frame>> framesSeqence_;
-    std::map<Frame, int> counts_;
-    size_t width_;
+    int fd_;
 };
 
-bool g_interrupted = false;
+void profile(int pid, Loop loop) {
+    static const int SAMPLING = 100;
 
-void onInterrupt(int) {
-    g_interrupted = true;
-}
+    SignalIterator signalIterator;
+    Tracer tracer(SAMPLING);
+    Heartbeat hb(SAMPLING);
 
-void setSigintHandler() {
-    struct sigaction action = {0};
-    action.sa_handler = &onInterrupt;
-    throwErrnoIfMinus1(sigaction(SIGINT, &action, nullptr));
-}
+    auto wats = attachAllThreads(pid);
 
-void liveProfile(int pid) {
-    setSigintHandler();
+    enum Status {
+        STATUS_RUNNING,
+        STATUS_STOPPING
+    };
+    throwErrnoIfMinus1(ualarm(0, 0));
+    int status = STATUS_STOPPING;
+    std::set<pid_t> toTrace = keys(wats);
+    std::set<pid_t> stalled;
+    std::vector<Frame> frames;
 
-    Wat wat(pid);
-    Heartbeat hb(100);
-    RunningStatistic stat(1000);
-    int iter = 0;
-
-    while (!g_interrupted) {
-        hb.beat();
-        if (hb.skippedBeats() > 0) {
-            std::cerr << "Too slow, skipping " << hb.skippedBeats() <<
-                    " beats...\n";
-        }
-        stat.pushFrames(wat.stacktrace());
-        usleep(hb.usecondsUntilNextBeat());
-        if (++iter % 10 == 0) {
-            std::vector<std::string> lines;
-            for (const auto &kv: stat.topFrames(30)) {
-                lines.push_back(str(boost::format(
-                        "%6.2f%% 0x%x %s") %
-                            (kv.first*100) %
-                            kv.second.ip %
-                            abbrev(demangle(kv.second.procName))));
+    for(;;) {
+        const int signal = signalIterator.next();
+        if (signal == SIGCHLD) {
+            int tidStatus;
+            // SIGCHLD is not real-time. This means that when we get a SIGCHLD,
+            // multiple events from children could be pending.
+            while (pid_t tid = throwErrnoIfMinus1(waitpid(
+                            -1,
+                            &tidStatus,
+                            WNOHANG | WCONTINUED | __WALL))) {
+                assert(tid != 0);
+                // TODO: set this option only once
+                throwErrnoIfMinus1(ptrace(
+                    PTRACE_SETOPTIONS,
+                    tid,
+                    nullptr,
+                    static_cast<long>(PTRACE_O_TRACECLONE)));
+                if (WIFEXITED(tidStatus)) {
+                    wats.erase(tid);
+                    stalled.erase(tid);
+                } else if (WIFSIGNALED(tidStatus)) {
+                    // Killed by a deadly signal. Nothing to do here anymore.
+                    exit(0);
+                } else if (WIFSTOPPED(tidStatus)) {
+                    switch (WSTOPSIG(tidStatus)) {
+                        // group-stop
+                        case SIGSTOP:
+                        case SIGTSTP:
+                        case SIGTTOU:
+                        case SIGTTIN:
+                            if (status != STATUS_STOPPING) {
+                                // Not our work.
+                                stalled.insert(tid);
+                                frames.clear();
+                            } else if (stalled.empty()) {
+                                assert(wats.count(tid));
+                                auto stacktrace =
+                                        wats.find(tid)->second.stacktrace();
+                                frames.insert(
+                                        frames.end(),
+                                        stacktrace.begin(),
+                                        stacktrace.end());
+                                toTrace.erase(tid);
+                                if (toTrace.empty()) {
+                                    hb.beat();
+                                    if (hb.skippedBeats() > 0) {
+                                        std::cerr <<
+                                            "Too slow, skipping " <<
+                                            hb.skippedBeats() <<
+                                            " beats...\n";
+                                    }
+                                    assert(wats.count(tid));
+                                    tracer.tick(wats.find(tid)->second.stacktrace());
+                                    ualarm(hb.usecondsUntilNextBeat(), 0);
+                                    status = STATUS_RUNNING;
+                                    if (loop == Loop::NO) {
+                                        return;
+                                    }
+                                }
+                                throwErrnoIfMinus1(ptrace(PTRACE_CONT, tid, nullptr, nullptr));
+                            }
+                        break;
+                        case SIGTRAP:
+                            if (status >> 16 == PTRACE_EVENT_CLONE) {
+                                long newTid;
+                                throwErrnoIfMinus1(ptrace(
+                                        PTRACE_GETEVENTMSG, tid, nullptr, &newTid));
+                                wats.emplace(newTid, Wat(newTid));
+                            }
+                            throwErrnoIfMinus1(ptrace(PTRACE_CONT, tid, nullptr, nullptr));
+                        break;
+                        default:
+                            throwErrnoIfMinus1(ptrace(
+                                    PTRACE_CONT,
+                                    tid,
+                                    nullptr,
+                                    static_cast<long>(WSTOPSIG(tidStatus))));
+                    }
+                } else if (WIFCONTINUED(tidStatus)) {
+                    stalled.erase(tid);
+                } else {
+                    throw std::logic_error(str(boost::format(
+                                    "Unknown status reported: tid=%d, status=%d") %
+                                        tid % tidStatus));
+                }
             }
-            putLines(lines);
+        } else if (signal == SIGALRM) {
+            toTrace = keys(wats);
+            throwErrnoIfMinus1(kill(pid, SIGSTOP));
+            status = STATUS_STOPPING;
+        } else if (signal == SIGINT) {
+            return;
+        } else {
+            throw std::logic_error(str(boost::format(
+                        "Unexpected signal: %s") % strsignal(signal)));
         }
     }
 }
@@ -216,9 +307,9 @@ int main(int argc, const char *argv[])
         }
         int pid = boost::lexical_cast<int>(argv[1]);
         if (argc == 3 && argv[2] == std::string("-1")) {
-            stacktrace(pid);
+            profile(pid, Loop::NO);
         } else {
-            liveProfile(pid);
+            profile(pid, Loop::YES);
         }
     } catch (const std::exception& e) {
         std::cerr << "Exception: " << e.what() << std::endl;
