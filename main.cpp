@@ -27,6 +27,12 @@
 
 using boost::filesystem::directory_iterator;
 
+template <class T>
+void ptraceCmd(__ptrace_request request, pid_t pid, T arg) {
+    throwErrnoIfMinus1(ptrace(
+            request, pid, nullptr, reinterpret_cast<void *>(arg)));
+}
+
 template <class F>
 void forallTids(pid_t pid, F f) {
     for (directory_iterator i(str(
@@ -48,8 +54,7 @@ std::map<pid_t, Wat> attachAllThreads(pid_t pid) {
         forallTids(pid, [&](pid_t tid) {
             if (!wats.count(tid)) {
                 tracedSomething = true;
-                throwErrnoIfMinus1(
-                        ptrace(PTRACE_ATTACH, tid, nullptr, nullptr));
+                ptraceCmd(PTRACE_ATTACH, tid, 0);
                 wats.emplace(tid, Wat(tid));
             }
         });
@@ -95,119 +100,131 @@ private:
     int fd_;
 };
 
-void profile(
-        int pid,
-        Tracer* tracer,
-        Heartbeat* heartbeat) {
-    SignalIterator signalIterator;
-    auto wats = attachAllThreads(pid);
-
-    enum Status {
-        STATUS_RUNNING,
-        STATUS_STOPPING
+class Profiler {
+    enum class Status {
+        RUNNING,
+        STOPPING
     };
-    int status = STATUS_STOPPING;
-    std::set<pid_t> toTrace = keys(wats);
-    std::set<pid_t> stalled;
-    std::map<pid_t, std::vector<Frame>> stacktraces;
 
-    for(;;) {
-        const int signal = signalIterator.next();
-        if (signal == SIGCHLD) {
-            int tidStatus;
-            // SIGCHLD is not real-time. This means that when we get a SIGCHLD,
-            // multiple events from children could be pending.
-            while (pid_t tid = throwErrnoIfMinus1(waitpid(
-                            -1,
-                            &tidStatus,
-                            WNOHANG | WCONTINUED | __WALL))) {
-                // TODO: set this option only once
-                throwErrnoIfMinus1(ptrace(
-                    PTRACE_SETOPTIONS,
-                    tid,
-                    nullptr,
-                    static_cast<long>(PTRACE_O_TRACECLONE)));
-                if (WIFEXITED(tidStatus)) {
-                    wats.erase(tid);
-                    stalled.erase(tid);
-                } else if (WIFSIGNALED(tidStatus)) {
-                    // Killed by a deadly signal. Nothing to do here anymore.
-                    exit(0);
-                } else if (WIFSTOPPED(tidStatus)) {
-                    switch (WSTOPSIG(tidStatus)) {
-                        // group-stop
-                        case SIGSTOP:
-                        case SIGTSTP:
-                        case SIGTTOU:
-                        case SIGTTIN:
-                            if (status != STATUS_STOPPING) {
-                                // Not our work.
-                                stalled.insert(tid);
-                                stacktraces.clear();
-                            } else if (stalled.empty()) {
-                                assert(wats.count(tid));
-                                stacktraces.emplace(
-                                        tid,
-                                        wats.find(tid)->second.stacktrace());
-                                toTrace.erase(tid);
-                                if (toTrace.empty()) {
-                                    tracer->tick(std::move(stacktraces));
-                                    if (!heartbeat) {
-                                        return;
-                                    }
-                                    stacktraces.clear();
-                                    heartbeat->beat();
-                                    if (heartbeat->skippedBeats() > 0) {
-                                        tracer->addInfoLine(str(boost::format(
-                                            "Too slow, skipping %d beats...") %
-                                            heartbeat->skippedBeats()));
-                                    }
-                                    ualarm(std::max<uint64_t>(
-                                            1, heartbeat->usecondsUntilNextBeat()), 0);
-                                    status = STATUS_RUNNING;
-                                }
-                                throwErrnoIfMinus1(
-                                        ptrace(PTRACE_CONT, tid, nullptr, nullptr));
-                            }
-                        break;
-                        case SIGTRAP:
-                            if (status >> 16 == PTRACE_EVENT_CLONE) {
-                                long newTid;
-                                throwErrnoIfMinus1(ptrace(
-                                        PTRACE_GETEVENTMSG, tid, nullptr, &newTid));
-                                wats.emplace(newTid, Wat(newTid));
-                            }
-                            throwErrnoIfMinus1(ptrace(PTRACE_CONT, tid, nullptr, nullptr));
-                        break;
-                        default:
-                            throwErrnoIfMinus1(ptrace(
-                                    PTRACE_CONT,
-                                    tid,
-                                    nullptr,
-                                    static_cast<long>(WSTOPSIG(tidStatus))));
-                    }
-                } else if (WIFCONTINUED(tidStatus)) {
-                    stalled.erase(tid);
-                } else {
-                    throw std::logic_error(str(boost::format(
-                                    "Unknown status reported: tid=%d, status=%d") %
-                                        tid % tidStatus));
+public:
+    explicit Profiler(pid_t pid) :
+        pid_(pid),
+        wats_(attachAllThreads(pid)),
+        status_(Status::STOPPING),
+        toTrace_(keys(wats_))
+    {}
+
+    void eventLoop(Tracer* tracer, Heartbeat* heartbeat) {
+        for (int signal; (signal = signalIterator_.next()) != SIGINT;) {
+            if (signal == SIGCHLD) {
+                if (!handleSigchld(tracer, heartbeat)) {
+                    return;
                 }
-            }
-        } else if (signal == SIGALRM) {
-            toTrace = keys(wats);
-            for (pid_t tid: toTrace) {
-                throwErrnoIfMinus1(syscall(SYS_tgkill, pid, tid, SIGSTOP));
-            }
-            status = STATUS_STOPPING;
-        } else if (signal == SIGINT) {
-            return;
-        } else {
-            throw std::logic_error(str(boost::format(
+            } else if (signal == SIGALRM) {
+                handleSigalrm();
+            } else {
+                throw std::logic_error(str(boost::format(
                         "Unexpected signal: %s") % strsignal(signal)));
+            }
         }
     }
-}
+
+private:
+
+    bool handleSigchld(Tracer* tracer, Heartbeat* heartbeat) {
+        int tidStatus;
+        // SIGCHLD is not real-time. This means that when we get a SIGCHLD,
+        // multiple events from children could be pending.
+        while (pid_t tid = throwErrnoIfMinus1(waitpid(
+                        -1, &tidStatus, WNOHANG | WCONTINUED | __WALL))) {
+            // TODO: set this option only once
+            ptraceCmd(PTRACE_SETOPTIONS, tid, PTRACE_O_TRACECLONE);
+            if (WIFEXITED(tidStatus)) {
+                wats_.erase(tid);
+                stalled_.erase(tid);
+            } else if (WIFSIGNALED(tidStatus)) {
+                // Killed by a deadly signal. Nothing to do here anymore.
+                return false;
+            } else if (WIFSTOPPED(tidStatus)) {
+                switch (WSTOPSIG(tidStatus)) {
+                    // group-stop
+                    case SIGSTOP:
+                    case SIGTSTP:
+                    case SIGTTOU:
+                    case SIGTTIN:
+                        if (status_ == Status::RUNNING) {
+                            // Not our work.
+                            stalled_.insert(tid);
+                            stacktraces_.clear();
+                        } else {
+                            assert(status_ == Status::STOPPING);
+                            if (stalled_.empty()) {
+                                if (!handleAllTraced(tid, tracer, heartbeat)) {
+                                    return false;
+                                }
+                            }
+                        }
+                    break;
+                    case SIGTRAP:
+                        if (tidStatus >> 16 == PTRACE_EVENT_CLONE) {
+                            long newTid;
+                            ptraceCmd(PTRACE_GETEVENTMSG, tid, &newTid);
+                            wats_.emplace(newTid, Wat(newTid));
+                        }
+                        ptraceCmd(PTRACE_CONT, tid, 0);
+                    break;
+                    default:
+                        ptraceCmd(PTRACE_CONT, tid, WSTOPSIG(tidStatus));
+                }
+            } else if (WIFCONTINUED(tidStatus)) {
+                stalled_.erase(tid);
+            } else {
+                throw std::logic_error(str(boost::format(
+                        "Unknown status reported: tid=%d, status=%d") %
+                                tid % tidStatus));
+            }
+        }
+    }
+
+    void handleSigalrm() {
+        toTrace_ = keys(wats_);
+        for (pid_t tid: toTrace_) {
+            throwErrnoIfMinus1(syscall(SYS_tgkill, pid_, tid, SIGSTOP));
+        }
+        status_ = Status::STOPPING;
+    }
+
+    bool handleAllTraced(pid_t tid, Tracer* tracer, Heartbeat* heartbeat) {
+        assert(wats_.count(tid));
+        stacktraces_.emplace(tid, wats_.find(tid)->second.stacktrace());
+        toTrace_.erase(tid);
+        if (toTrace_.empty()) {
+            tracer->tick(std::move(stacktraces_));
+            if (!heartbeat) {
+                return false;
+            }
+            stacktraces_.clear();
+            heartbeat->beat();
+            if (heartbeat->skippedBeats() > 0) {
+                tracer->addInfoLine(str(boost::format(
+                    "Too slow, skipping %d beats...") %
+                        heartbeat->skippedBeats()));
+            }
+            ualarm(std::max(1ul, heartbeat->usecondsUntilNextBeat()), 0);
+            status_ = Status::RUNNING;
+        }
+        ptraceCmd(PTRACE_CONT, tid, 0);
+        return true;
+    }
+
+    pid_t pid_;
+    SignalIterator signalIterator_;
+    std::map<pid_t, Wat> wats_;
+    Status status_;
+    std::set<pid_t> toTrace_;
+    std::set<pid_t> stalled_;
+    std::map<pid_t, std::vector<Frame>> stacktraces_;
+};
 
 int main(int argc, const char *argv[])
 {
@@ -220,12 +237,12 @@ int main(int argc, const char *argv[])
         int pid = boost::lexical_cast<int>(argv[1]);
         if (argc == 3 && argv[2] == std::string("-1")) {
             OneshotTracer tracer;
-            profile(pid, &tracer, nullptr);
+            Profiler(pid).eventLoop(&tracer, nullptr);
         } else {
             const int SAMPLING = 200;
             ProfilingTracer tracer(SAMPLING);
             Heartbeat heartbeat(SAMPLING);
-            profile(pid, &tracer, &heartbeat);
+            Profiler(pid).eventLoop(&tracer, &heartbeat);
         }
     } catch (const std::exception& e) {
         std::cerr << "Exception: " << e.what() << std::endl;
