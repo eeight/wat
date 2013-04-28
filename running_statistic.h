@@ -10,10 +10,10 @@ class RunningStatistic {
 public:
     explicit RunningStatistic(size_t width);
     void pushFrames(std::vector<Frame> frames);
-    std::vector<std::pair<float, Frame>> topFrames(size_t count);
+    std::vector<std::pair<float, std::string>> topFrames(size_t count);
 
 private:
     std::list<std::vector<Frame>> framesSeqence_;
-    std::map<Frame, int> counts_;
+    std::map<std::string, int> counts_;
     size_t width_;
 };

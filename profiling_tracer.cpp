@@ -37,10 +37,9 @@ void ProfilingTracer::tick(std::map<pid_t, std::vector<Frame>> stacktraces) {
         std::vector<std::string> lines;
         for (const auto &kv: statistic_.topFrames(30)) {
             lines.push_back(str(boost::format(
-                    "%6.2f%% 0x%x %s") %
+                    "%6.2f%% %s") %
                         (kv.first*100) %
-                        kv.second.ip %
-                        abbrev(demangle(kv.second.procName))));
+                        abbrev(demangle(kv.second))));
         }
         putLines(lines);
     }
