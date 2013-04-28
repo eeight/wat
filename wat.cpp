@@ -186,7 +186,7 @@ void profile(
     int status = STATUS_STOPPING;
     std::set<pid_t> toTrace = keys(wats);
     std::set<pid_t> stalled;
-    std::vector<std::vector<Frame>> stacktraces;
+    std::map<pid_t, std::vector<Frame>> stacktraces;
 
     for(;;) {
         const int signal = signalIterator.next();
@@ -224,7 +224,8 @@ void profile(
                                 stacktraces.clear();
                             } else if (stalled.empty()) {
                                 assert(wats.count(tid));
-                                stacktraces.push_back(
+                                stacktraces.emplace(
+                                        tid,
                                         wats.find(tid)->second.stacktrace());
                                 toTrace.erase(tid);
                                 if (toTrace.empty()) {

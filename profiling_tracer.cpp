@@ -8,12 +8,16 @@
 
 namespace {
 
-template <class T>
-std::vector<T> concat(std::vector<std::vector<T>> parts) {
-    std::vector<T> result = std::move(parts.front());
+std::vector<Frame> concatStacktraces(
+        std::map<pid_t, std::vector<Frame>> stacktraces) {
+    std::vector<Frame> result;
 
-    for (size_t i = 1; i != parts.size(); ++i) {
-        result.insert(result.end(), parts[i].begin(), parts[i].end());
+    for (auto& kv: stacktraces) {
+        if (result.empty()) {
+            result = std::move(kv.second);
+        } else {
+            result.insert(result.end(), kv.second.begin(), kv.second.end());
+        }
     }
 
     return result;
@@ -27,8 +31,8 @@ ProfilingTracer::ProfilingTracer(int sampling):
     iteration_(0)
 {}
 
-void ProfilingTracer::tick(std::vector<std::vector<Frame>> stacktraces) {
-    statistic_.pushFrames(concat(std::move(stacktraces)));
+void ProfilingTracer::tick(std::map<pid_t, std::vector<Frame>> stacktraces) {
+    statistic_.pushFrames(concatStacktraces(std::move(stacktraces)));
     if (++iteration_ % (sampling_ / 10) == 0) {
         std::vector<std::string> lines;
         for (const auto &kv: statistic_.topFrames(30)) {

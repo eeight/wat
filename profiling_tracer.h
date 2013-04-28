@@ -8,7 +8,7 @@
 class ProfilingTracer : public Tracer{
 public:
     explicit ProfilingTracer(int sampling);
-    void tick(std::vector<std::vector<Frame>> stacktraces) override;
+    void tick(std::map<pid_t, std::vector<Frame>> stacktraces) override;
 
 private:
     RunningStatistic statistic_;
