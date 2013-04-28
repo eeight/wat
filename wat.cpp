@@ -1,5 +1,7 @@
 #include "exception.h"
 #include "heartbeat.h"
+#include "oneshot_tracer.h"
+#include "profiling_tracer.h"
 #include "scope.h"
 #include "symbols.h"
 #include "tracer.h"
@@ -69,7 +71,7 @@ public:
     }
 
     std::vector<Frame> stacktrace() {
-        std::vector<Frame> frames;
+        std::vector<Frame> stacktrace;
 
         unw_cursor_t cursor;
         throwUnwindIfLessThan0(unw_init_remote(
@@ -83,14 +85,14 @@ public:
             throwUnwindIfLessThan0(unw_get_reg(&cursor, UNW_REG_SP, &sp));
 
             std::string procName = getProcName(&cursor);
-            frames.push_back({ip, sp, procName});
+            stacktrace.push_back({ip, sp, procName});
 
             if (++depth == 200) {
                 break;
             }
         } while (unw_step(&cursor) > 0);
 
-        return frames;
+        return stacktrace;
     }
 
 private:
@@ -169,13 +171,11 @@ private:
     int fd_;
 };
 
-void profile(int pid, Loop loop) {
-    static const int SAMPLING = 100;
-
+void profile(
+        int pid,
+        Tracer* tracer,
+        Heartbeat* heartbeat) {
     SignalIterator signalIterator;
-    Tracer tracer(SAMPLING);
-    Heartbeat hb(SAMPLING);
-
     auto wats = attachAllThreads(pid);
 
     enum Status {
@@ -186,7 +186,7 @@ void profile(int pid, Loop loop) {
     int status = STATUS_STOPPING;
     std::set<pid_t> toTrace = keys(wats);
     std::set<pid_t> stalled;
-    std::vector<Frame> frames;
+    std::vector<std::vector<Frame>> stacktraces;
 
     for(;;) {
         const int signal = signalIterator.next();
@@ -221,31 +221,27 @@ void profile(int pid, Loop loop) {
                             if (status != STATUS_STOPPING) {
                                 // Not our work.
                                 stalled.insert(tid);
-                                frames.clear();
+                                stacktraces.clear();
                             } else if (stalled.empty()) {
                                 assert(wats.count(tid));
-                                auto stacktrace =
-                                        wats.find(tid)->second.stacktrace();
-                                frames.insert(
-                                        frames.end(),
-                                        stacktrace.begin(),
-                                        stacktrace.end());
+                                stacktraces.push_back(
+                                        wats.find(tid)->second.stacktrace());
                                 toTrace.erase(tid);
                                 if (toTrace.empty()) {
-                                    hb.beat();
-                                    if (hb.skippedBeats() > 0) {
-                                        std::cerr <<
-                                            "Too slow, skipping " <<
-                                            hb.skippedBeats() <<
-                                            " beats...\n";
-                                    }
-                                    assert(wats.count(tid));
-                                    tracer.tick(wats.find(tid)->second.stacktrace());
-                                    ualarm(hb.usecondsUntilNextBeat(), 0);
-                                    status = STATUS_RUNNING;
-                                    if (loop == Loop::NO) {
+                                    tracer->tick(std::move(stacktraces));
+                                    if (!heartbeat) {
                                         return;
                                     }
+                                    stacktraces.clear();
+                                    heartbeat->beat();
+                                    if (heartbeat->skippedBeats() > 0) {
+                                        std::cerr <<
+                                            "Too slow, skipping " <<
+                                            heartbeat->skippedBeats() <<
+                                            " beats...\n";
+                                    }
+                                    ualarm(heartbeat->usecondsUntilNextBeat(), 0);
+                                    status = STATUS_RUNNING;
                                 }
                                 throwErrnoIfMinus1(ptrace(PTRACE_CONT, tid, nullptr, nullptr));
                             }
@@ -287,16 +283,6 @@ void profile(int pid, Loop loop) {
     }
 }
 
-void stacktrace(int pid) {
-    Wat wat(pid);
-
-    for (const auto& frame: wat.stacktrace()) {
-        std::cout << str(boost::format("0x%x %s\n") %
-                    frame.ip %
-                    abbrev(demangle(frame.procName)));
-    }
-}
-
 int main(int argc, const char *argv[])
 {
     try {
@@ -307,9 +293,13 @@ int main(int argc, const char *argv[])
         }
         int pid = boost::lexical_cast<int>(argv[1]);
         if (argc == 3 && argv[2] == std::string("-1")) {
-            profile(pid, Loop::NO);
+            OneshotTracer tracer;
+            profile(pid, &tracer, nullptr);
         } else {
-            profile(pid, Loop::YES);
+            const int SAMPLING = 100;
+            ProfilingTracer tracer(SAMPLING);
+            Heartbeat heartbeat(SAMPLING);
+            profile(pid, &tracer, &heartbeat);
         }
     } catch (const std::exception& e) {
         std::cerr << "Exception: " << e.what() << std::endl;
