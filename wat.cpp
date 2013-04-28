@@ -11,6 +11,7 @@
 #include <sys/ptrace.h>
 #include <sys/signalfd.h>
 #include <sys/wait.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #include <libunwind.h>
@@ -273,7 +274,9 @@ void profile(
             }
         } else if (signal == SIGALRM) {
             toTrace = keys(wats);
-            throwErrnoIfMinus1(kill(pid, SIGSTOP));
+            for (pid_t tid: toTrace) {
+                throwErrnoIfMinus1(syscall(SYS_tgkill, pid, tid, SIGSTOP));
+            }
             status = STATUS_STOPPING;
         } else if (signal == SIGINT) {
             return;
