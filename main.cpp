@@ -184,6 +184,7 @@ private:
                                 tid % tidStatus));
             }
         }
+        return true;
     }
 
     void handleSigalrm() {
