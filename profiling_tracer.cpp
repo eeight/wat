@@ -41,6 +41,16 @@ void ProfilingTracer::tick(std::map<pid_t, std::vector<Frame>> stacktraces) {
                         (kv.first*100) %
                         abbrev(demangle(kv.second))));
         }
+        if (!infoLines_.empty()) {
+            lines.push_back("");
+            lines.push_back("INFO:");
+            lines.insert(lines.end(), infoLines_.begin(), infoLines_.end());
+            infoLines_.clear();
+        }
         putLines(lines);
     }
+}
+
+void ProfilingTracer::addInfoLine(const std::string& info) {
+    infoLines_.push_back(info);
 }

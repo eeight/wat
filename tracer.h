@@ -10,5 +10,6 @@
 class Tracer {
 public:
     virtual void tick(std::map<pid_t, std::vector<Frame>> stacktraces) = 0;
+    virtual void addInfoLine(const std::string& info) = 0;
     virtual ~Tracer() {}
 };

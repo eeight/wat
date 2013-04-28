@@ -183,7 +183,6 @@ void profile(
         STATUS_RUNNING,
         STATUS_STOPPING
     };
-    throwErrnoIfMinus1(ualarm(0, 0));
     int status = STATUS_STOPPING;
     std::set<pid_t> toTrace = keys(wats);
     std::set<pid_t> stalled;
@@ -236,15 +235,16 @@ void profile(
                                     stacktraces.clear();
                                     heartbeat->beat();
                                     if (heartbeat->skippedBeats() > 0) {
-                                        std::cerr <<
-                                            "Too slow, skipping " <<
-                                            heartbeat->skippedBeats() <<
-                                            " beats...\n";
+                                        tracer->addInfoLine(str(boost::format(
+                                            "Too slow, skipping %d beats...") %
+                                            heartbeat->skippedBeats()));
                                     }
-                                    ualarm(heartbeat->usecondsUntilNextBeat(), 0);
+                                    ualarm(std::max<uint64_t>(
+                                            1, heartbeat->usecondsUntilNextBeat()), 0);
                                     status = STATUS_RUNNING;
                                 }
-                                throwErrnoIfMinus1(ptrace(PTRACE_CONT, tid, nullptr, nullptr));
+                                throwErrnoIfMinus1(
+                                        ptrace(PTRACE_CONT, tid, nullptr, nullptr));
                             }
                         break;
                         case SIGTRAP:
@@ -299,7 +299,7 @@ int main(int argc, const char *argv[])
             OneshotTracer tracer;
             profile(pid, &tracer, nullptr);
         } else {
-            const int SAMPLING = 100;
+            const int SAMPLING = 200;
             ProfilingTracer tracer(SAMPLING);
             Heartbeat heartbeat(SAMPLING);
             profile(pid, &tracer, &heartbeat);
