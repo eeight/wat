@@ -199,7 +199,6 @@ void profile(
                             -1,
                             &tidStatus,
                             WNOHANG | WCONTINUED | __WALL))) {
-                assert(tid != 0);
                 // TODO: set this option only once
                 throwErrnoIfMinus1(ptrace(
                     PTRACE_SETOPTIONS,
