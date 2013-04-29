@@ -52,6 +52,8 @@ Wat::~Wat() {
 
 std::future<std::vector<Frame>> Wat::stacktrace() {
     stackPromise_ = std::promise<std::vector<Frame>>();
+    // TODO remove race condition happening here:
+    //  tracer thread may not be in waitpid
     throwErrnoIfMinus1(pthread_kill(thread_.native_handle(), SIGALRM));
     return stackPromise_.get_future();
 }
