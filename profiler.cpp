@@ -77,6 +77,9 @@ void Profiler::eventLoop(Tracer* tracer, Heartbeat* heartbeat) {
                 "Too slow, skipping %d beats...") %
                     heartbeat->skippedBeats()));
         }
+        if (lastSignal() == SIGINT) {
+            break;
+        }
         while (heartbeat->usecondsUntilNextBeat()) {
             resetLastSignal();
             if (usleep(std::max(1ul, heartbeat->usecondsUntilNextBeat())) < 0) {
