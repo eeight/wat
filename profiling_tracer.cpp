@@ -4,9 +4,28 @@
 
 #include <boost/format.hpp>
 
+#include <algorithm>
+#include <set>
+
 #include <unistd.h>
 
 namespace {
+
+std::vector<Frame> removeDuplicatedFunctions(std::vector<Frame> frames) {
+    std::set<std::string> names;
+    auto seen = [&](const Frame& frame) {
+        if (names.count(frame.procName)) {
+            return true;
+        } else {
+            names.insert(frame.procName);
+            return false;
+        }
+    };
+    frames.erase(
+            std::remove_if(frames.begin(), frames.end(), seen),
+            frames.end());
+    return frames;
+}
 
 std::vector<Frame> concatStacktraces(
         std::map<pid_t, std::vector<Frame>> stacktraces) {
@@ -14,9 +33,10 @@ std::vector<Frame> concatStacktraces(
 
     for (auto& kv: stacktraces) {
         if (result.empty()) {
-            result = std::move(kv.second);
+            result = removeDuplicatedFunctions(std::move(kv.second));
         } else {
-            result.insert(result.end(), kv.second.begin(), kv.second.end());
+            auto stacktrace = removeDuplicatedFunctions(std::move(kv.second));
+            result.insert(result.end(), stacktrace.begin(), stacktrace.end());
         }
     }
 
