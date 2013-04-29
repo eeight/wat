@@ -1,39 +1,33 @@
 #pragma once
 
 #include "heartbeat.h"
-#include "signal_iterator.h"
 #include "tracer.h"
 #include "wat.h"
 
 #include <map>
-#include <set>
+#include <memory>
+#include <mutex>
 #include <vector>
 
 #include <unistd.h>
 
 class Profiler {
-    enum class Status {
-        RUNNING,
-        STOPPING
-    };
-
 public:
     explicit Profiler(pid_t pid);
 
     void eventLoop(Tracer* tracer, Heartbeat* heartbeat);
 
 private:
+    friend class Wat;
+    void newThread(pid_t tid);
+    void endThread(pid_t tid);
 
-    bool handleSigchld(Tracer* tracer, Heartbeat* heartbeat);
-    void handleSigalrm();
-    bool handleAllTraced(pid_t tid, Tracer* tracer, Heartbeat* heartbeat);
+    void doStacktraces(Tracer* tracer);
+    void reapDead();
 
     pid_t pid_;
-    SignalIterator signalIterator_;
-    std::map<pid_t, Wat> wats_;
-    Status status_;
-    std::set<pid_t> toTrace_;
-    std::set<pid_t> stalled_;
-    std::map<pid_t, std::vector<Frame>> stacktraces_;
+    std::map<pid_t, std::unique_ptr<Wat>> wats_;
+    std::vector<pid_t> zombies_;
+    std::mutex mutex_;
 };
 

@@ -1,4 +1,4 @@
-CXXFLAGS := -std=c++1y -ggdb3
+CXXFLAGS := -std=c++1y -ggdb3 -Wall -Wextra -Werror
 LIBS := boost_filesystem boost_system unwind-ptrace unwind-generic ncurses
 all:: wat
 
