@@ -121,15 +121,7 @@ void Profiler::doStacktraces(Tracer* tracer) {
     std::map<pid_t, std::vector<Frame>> stacktraces;
     for (auto& kv: stacktraceFutures) {
         try {
-            // TODO: get rid of this.
-            if (kv.second.wait_for(
-                        std::chrono::milliseconds(100)) ==
-                    std::future_status::ready) {
-                stacktraces.emplace(kv.first, kv.second.get());
-            } else {
-                tracer->addInfoLine(str(boost::format(
-                        "Stacktrace timed out for tid=%d") % kv.first));
-            }
+            stacktraces.emplace(kv.first, kv.second.get());
         } catch (const std::exception& e) {
             tracer->addInfoLine(std::string("Exception: ") + e.what());
         }

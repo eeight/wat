@@ -53,9 +53,7 @@ Wat::~Wat() {
 
 std::future<std::vector<Frame>> Wat::stacktrace() {
     stackPromise_ = std::promise<std::vector<Frame>>();
-    // TODO remove race condition happening here:
-    //  tracer thread may not be in waitpid
-    throwErrnoIfMinus1(pthread_kill(thread_.native_handle(), SIGALRM));
+    throwErrnoIfMinus1(syscall(SYS_tgkill, pid_, tid_, SIGSTOP));
     return stackPromise_.get_future();
 }
 
@@ -66,10 +64,13 @@ void Wat::tracer() {
     assertStopped(status);
     ptraceCmd(PTRACE_SETOPTIONS, tid_, PTRACE_O_TRACECLONE);
     ptraceCmd(PTRACE_CONT, tid_, 0);
-    handleSignals({SIGALRM, SIGTERM}, {SIGINT});
+    handleSignals({SIGTERM}, {SIGINT});
     ready_.set_value();
     for (;;) {
         int status;
+        if (lastSignal() == SIGTERM) {
+            break;
+        }
         resetLastSignal();
         pid_t tid = waitpid(tid_, &status, __WALL);
         if (tid == tid_) {
@@ -86,9 +87,6 @@ void Wat::tracer() {
         }
         if (lastSignal() == SIGTERM) {
             break;
-        } else if (lastSignal() == SIGALRM) {
-            throwErrnoIfMinus1(
-                    syscall(SYS_tgkill, pid_, tid_, SIGSTOP));
         } else {
             throw std::logic_error(str(boost::format(
                     "Unexpected signal received: tid=%d, signal=%d (%s)") %
