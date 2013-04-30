@@ -5,6 +5,7 @@
 #include <map>
 
 #include <cxxabi.h>
+#include <string.h>
 
 std::string demangle(const std::string& str) {
     int status;

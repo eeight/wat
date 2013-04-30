@@ -10,6 +10,7 @@
 
 #include <libunwind-ptrace.h>
 
+#include <string.h>
 #include <sys/ptrace.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>

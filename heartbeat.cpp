@@ -1,6 +1,8 @@
 #include "exception.h"
 #include "heartbeat.h"
 
+#include <stdexcept>
+
 #include <sys/time.h>
 
 namespace {
