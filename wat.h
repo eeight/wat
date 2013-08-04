@@ -36,4 +36,8 @@ private:
     std::promise<std::vector<Frame>> stackPromise_;
     std::promise<void> ready_;
     std::thread thread_;
+
+    std::mutex mutex_;
+    bool isAlive_;
+    bool isStacktracePending_;
 };

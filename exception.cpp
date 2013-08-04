@@ -7,9 +7,13 @@
 
 int throwErrnoIfMinus1(int ret) {
     if (ret == -1) {
-        throw std::runtime_error(std::string("syscall: ") + strerror(errno));
+        throwErrno();
     }
     return ret;
+}
+
+int throwErrno() {
+    throw std::runtime_error(std::string("syscall: ") + strerror(errno));
 }
 
 int throwUnwindIfLessThan0(int ret) {

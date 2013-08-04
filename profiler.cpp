@@ -115,7 +115,11 @@ void Profiler::doStacktraces(Tracer* tracer) {
     {
         std::unique_lock<std::mutex> lock(mutex_);
         for (auto& kv: wats_) {
-            stacktraceFutures.emplace(kv.first, kv.second->stacktrace());
+            try {
+                stacktraceFutures.emplace(kv.first, kv.second->stacktrace());
+            } catch (const std::exception& e) {
+                tracer->addInfoLine(std::string("Exception: ") + e.what());
+            }
         }
     }
     std::map<pid_t, std::vector<Frame>> stacktraces;

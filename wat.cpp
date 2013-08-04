@@ -18,9 +18,14 @@
 namespace {
 
 template <class T>
+int ptraceCmdNoThrow(__ptrace_request request, pid_t tid, T arg) {
+    return ptrace(
+            request, tid, nullptr, reinterpret_cast<void *>(arg));
+}
+
+template <class T>
 void ptraceCmd(__ptrace_request request, pid_t tid, T arg) {
-    throwErrnoIfMinus1(ptrace(
-            request, tid, nullptr, reinterpret_cast<void *>(arg)));
+    throwErrnoIfMinus1(ptraceCmdNoThrow(request, tid, arg));
 }
 
 void assertStopped(int status) {
@@ -37,14 +42,25 @@ Wat::Wat(pid_t pid, pid_t tid, Profiler* profiler) :
         addressSpace_(throwUnwindIf0(
                 unw_create_addr_space(&_UPT_accessors, 0))),
         unwindInfo_(throwUnwindIf0(_UPT_create(tid))),
-        thread_([=] { tracer(); })
+        thread_([=] { tracer(); }),
+        isAlive_(true),
+        isStacktracePending_(false)
 {
     ready_.get_future().wait();
 }
 
 Wat::~Wat() {
-    throwErrnoIfMinus1(pthread_kill(thread_.native_handle(), SIGTERM));
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+
+        if (isAlive_) {
+            throwErrnoIfMinus1(
+                    pthread_kill(thread_.native_handle(), SIGTERM));
+        }
+    }
+
     thread_.join();
+
     unw_destroy_addr_space(addressSpace_);
     if (unwindInfo_) {
         _UPT_destroy(unwindInfo_);
@@ -52,13 +68,34 @@ Wat::~Wat() {
 }
 
 std::future<std::vector<Frame>> Wat::stacktrace() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (!isAlive_) {
+        throw std::runtime_error(
+            "Cannot obtain stacktrace: thread has terminated already");
+    }
+    assert(!isStacktracePending_);
+    isStacktracePending_ = true;
     stackPromise_ = std::promise<std::vector<Frame>>();
     throwErrnoIfMinus1(syscall(SYS_tgkill, pid_, tid_, SIGSTOP));
     return stackPromise_.get_future();
 }
 
 void Wat::tracer() {
-    ptraceCmd(PTRACE_ATTACH, tid_, 0);
+    const int ptraceRet = ptraceCmdNoThrow(PTRACE_ATTACH, tid_, 0);
+    if (ptraceRet == -1) {
+        if (errno == ESRCH) {
+            std::unique_lock<std::mutex> lock(mutex_);
+            if (isStacktracePending_) {
+                std::make_exception_ptr(std::runtime_error(
+                        "Cannot attach thread: it has terminated already"));
+            }
+            isAlive_ = false;
+            return;
+        } else {
+            throwErrno();
+        }
+    }
+
     int status;
     throwErrnoIfMinus1(waitpid(tid_, &status, __WALL));
     assertStopped(status);
@@ -69,6 +106,8 @@ void Wat::tracer() {
     for (;;) {
         int status;
         if (lastSignal() == SIGTERM) {
+            std::unique_lock<std::mutex> lock(mutex_);
+            isAlive_ = false;
             break;
         }
         resetLastSignal();
@@ -116,6 +155,10 @@ bool Wat::onTraceeStatusChanged(int status) {
             case SIGTTOU:
             case SIGTTIN:
                 stackPromise_.set_value(stacktraceImpl());
+                {
+                    std::unique_lock<std::mutex> lock(mutex_);
+                    isStacktracePending_ = false;
+                }
                 deliveredSignal = 0;
             break;
             case SIGTRAP:
