@@ -64,7 +64,14 @@ void ProfilingTracer::tick(std::map<pid_t, std::vector<Frame>> stacktraces) {
         if (!infoLines_.empty()) {
             lines.push_back("");
             lines.push_back("INFO:");
-            lines.insert(lines.end(), infoLines_.begin(), infoLines_.end());
+            for (const auto& pair: infoLines_) {
+                if (pair.second > 1) {
+                    lines.push_back(str(boost::format(
+                            "%s (x %d times)") % pair.first % pair.second));
+                } else {
+                    lines.push_back(pair.first);
+                }
+            }
             infoLines_.clear();
         }
         putLines(lines);
@@ -72,5 +79,5 @@ void ProfilingTracer::tick(std::map<pid_t, std::vector<Frame>> stacktraces) {
 }
 
 void ProfilingTracer::addInfoLine(const std::string& info) {
-    infoLines_.push_back(info);
+    ++infoLines_[info];
 }

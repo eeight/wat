@@ -3,6 +3,7 @@
 #include "running_statistic.h"
 #include "tracer.h"
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -14,7 +15,7 @@ public:
 
 private:
     RunningStatistic statistic_;
-    std::vector<std::string> infoLines_;
+    std::map<std::string, size_t> infoLines_;
     int sampling_;
     int iteration_;
 };

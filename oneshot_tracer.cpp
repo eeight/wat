@@ -16,3 +16,7 @@ void OneshotTracer::tick(std::map<pid_t, std::vector<Frame>> stacktraces) {
         std::cout << std::endl;
     }
 }
+
+void OneshotTracer::addInfoLine(const std::string& info) {
+    std::cout << ">> " << info << std::endl;
+}
