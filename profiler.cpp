@@ -77,8 +77,9 @@ Profiler::Profiler(pid_t pid) :
 }
 
 Profiler::~Profiler() {
+    isStopping_.store(true);
     std::unique_lock<std::mutex> lock(mutex_);
-    isStopping_ = true;
+    wats_.clear();
 }
 
 void Profiler::eventLoop(Tracer* tracer, Heartbeat* heartbeat) {
@@ -112,14 +113,12 @@ void Profiler::eventLoop(Tracer* tracer, Heartbeat* heartbeat) {
 
 void Profiler::newThread(pid_t tid) {
     try {
-        std::unique_lock<std::mutex> lock(mutex_);
-        if (isStopping_) {
+        if (isStopping_.load()) {
             return;
         }
-        lock.unlock();
         StoppedWat stoppedWat(pid_, tid, this);
 
-        lock.lock();
+        std::unique_lock<std::mutex> lock(mutex_);
         //std::cerr << "new: tid=" << tid << "\n";
         //std::cerr << "size(wats): " << wats_.size() << "\n";
         wats_.emplace(tid, std::move(stoppedWat).continueWat());

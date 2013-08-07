@@ -26,7 +26,7 @@ private:
     void reapDead();
 
     pid_t pid_;
-    bool isStopping_;
+    std::atomic<bool> isStopping_;
     std::map<pid_t, Wat> wats_;
     std::vector<pid_t> zombies_;
     std::mutex mutex_;
