@@ -64,8 +64,7 @@ std::set<typename Container::key_type> keys(const Container& container) {
 } // namespace
 
 Profiler::Profiler(pid_t pid) :
-    pid_(pid),
-    isStopping_(false)
+    pid_(pid)
 {
     auto stoppedWats = attachAllThreads(pid, this);
     //std::cerr << ">>> ATTACHED " << stoppedWats.size() << " threads\n";
@@ -77,7 +76,7 @@ Profiler::Profiler(pid_t pid) :
 }
 
 Profiler::~Profiler() {
-    isStopping_.store(true);
+    std::unique_lock<std::mutex> stoppingLock(stoppingMutex_);
     std::unique_lock<std::mutex> lock(mutex_);
     wats_.clear();
 }
@@ -112,10 +111,13 @@ void Profiler::eventLoop(Tracer* tracer, Heartbeat* heartbeat) {
 }
 
 void Profiler::newThread(pid_t tid) {
+    std::unique_lock<std::mutex> stoppingLock(
+            stoppingMutex_, std::try_to_lock);
+    if (!stoppingLock.owns_lock()) {
+        return;
+    }
+
     try {
-        if (isStopping_.load()) {
-            return;
-        }
         StoppedWat stoppedWat(pid_, tid, this);
 
         std::unique_lock<std::mutex> lock(mutex_);
@@ -127,17 +129,16 @@ void Profiler::newThread(pid_t tid) {
 }
 
 void Profiler::endThread(pid_t tid) {
+    std::unique_lock<std::mutex> stoppingLock(
+            stoppingMutex_, std::try_to_lock);
+    if (!stoppingLock.owns_lock()) {
+        return;
+    }
+
     std::unique_lock<std::mutex> lock(mutex_);
     //std::cerr << "dead: tid=" << tid << "\n";
     //std::cerr << "size(wats): " << wats_.size() << "\n";
     zombies_.push_back(tid);
-}
-
-void Profiler::reapDead() {
-    for (pid_t zombie: zombies_) {
-        wats_.erase(zombie);
-    }
-    zombies_.clear();
 }
 
 void Profiler::doStacktraces(Tracer* tracer) {
@@ -164,4 +165,11 @@ void Profiler::doStacktraces(Tracer* tracer) {
     }
 
     tracer->tick(std::move(stacktraces));
+}
+
+void Profiler::reapDead() {
+    for (pid_t zombie: zombies_) {
+        wats_.erase(zombie);
+    }
+    zombies_.clear();
 }
