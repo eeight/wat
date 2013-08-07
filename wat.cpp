@@ -24,6 +24,12 @@ void convertThreadErrors(F f) {
     try {
         f();
     } catch (const SyscallError& e) {
+        // Funny thing. According to the man page, ptrace should
+        // not return EPERM ever in our case. However it does
+        // from time to time.
+        // Turns out, linux uses this error code to signal that
+        // you are trying to trace a zombie process.
+        // Great.
         if (e.error() == ESRCH || e.error() == EPERM) {
             throw ThreadIsGone();
         } else {
