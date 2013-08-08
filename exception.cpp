@@ -5,6 +5,11 @@
 #include <libunwind.h>
 #include <string.h>
 
+SyscallError::SyscallError(int error) :
+    error_(error),
+    what_(std::string("syscall: ") + strerror(error))
+{}
+
 int throwErrnoIfMinus1(int ret) {
     if (ret == -1) {
         throwErrno();
@@ -13,7 +18,7 @@ int throwErrnoIfMinus1(int ret) {
 }
 
 int throwErrno() {
-    throw std::runtime_error(std::string("syscall: ") + strerror(errno));
+    throw SyscallError(errno);
 }
 
 int throwUnwindIfLessThan0(int ret) {
