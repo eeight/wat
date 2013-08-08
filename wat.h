@@ -3,6 +3,7 @@
 #include "frame.h"
 
 #include <future>
+#include <memory>
 #include <vector>
 
 #include <libunwind.h>
@@ -30,8 +31,12 @@ private:
     pid_t pid_;
     pid_t tid_;
     Profiler* profiler_;
-    unw_addr_space_t addressSpace_;
-    void *unwindInfo_;
+    std::unique_ptr<
+        struct unw_addr_space,
+        void (*)(unw_addr_space_t)> addressSpace_;
+    std::unique_ptr<
+        void,
+        void (*)(void *)> unwindInfo_;
     std::promise<std::vector<Frame>> stackPromise_;
     std::promise<void> ready_;
     std::promise<void> goodToGo_;

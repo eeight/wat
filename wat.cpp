@@ -65,9 +65,10 @@ WatTracer::WatTracer(pid_t pid, pid_t tid, Profiler* profiler) :
         pid_(pid),
         tid_(tid),
         profiler_(profiler),
-        addressSpace_(throwUnwindIf0(
-                unw_create_addr_space(&_UPT_accessors, 0))),
-        unwindInfo_(throwUnwindIf0(_UPT_create(tid_))),
+        addressSpace_(
+                throwUnwindIf0(unw_create_addr_space(&_UPT_accessors, 0)),
+                &unw_destroy_addr_space),
+        unwindInfo_(throwUnwindIf0(_UPT_create(tid_)), &_UPT_destroy),
         thread_([=] { tracer(); }),
         isAlive_(true),
         isStacktracePending_(false),
@@ -95,11 +96,6 @@ WatTracer::~WatTracer() {
     }
 
     thread_.join();
-
-    unw_destroy_addr_space(addressSpace_);
-    if (unwindInfo_) {
-        _UPT_destroy(unwindInfo_);
-    }
 }
 
 std::future<std::vector<Frame>> WatTracer::stacktrace() {
@@ -270,7 +266,7 @@ std::vector<Frame> WatTracer::stacktraceImpl() {
 
     unw_cursor_t cursor;
     throwUnwindIfLessThan0(unw_init_remote(
-                &cursor, addressSpace_, unwindInfo_));
+                &cursor, addressSpace_.get(), unwindInfo_.get()));
     int depth = 0;
     do {
         unw_word_t ip;
