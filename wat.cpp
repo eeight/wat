@@ -17,8 +17,16 @@
 
 #include <iostream>
 
-#define TRACE(...) std::cerr << __VA_ARGS__ << std::endl;
-//#define TRACE(...)
+std::mutex cerrmutex;
+
+#if 0
+#   define TRACE(...) do { \
+        std::unique_lock<std::mutex> llllock(cerrmutex); \
+        std::cerr << __VA_ARGS__ << std::endl; \
+    } while (false)
+#else
+#   define TRACE(...)
+#endif
 
 namespace {
 
@@ -86,7 +94,7 @@ WatTracer::WatTracer(pid_t pid, pid_t tid, Profiler* profiler) :
         doDetach_(false),
         thread_([=] { tracer(); })
 {
-    TRACE("WAITING UNTIL tid=" << tid_ << " is ready");
+    TRACE("WAITING UNTIL tid=" << tid_ << " is attached");
     try {
         ready_.get_future().get();
     } catch (...) {
@@ -164,6 +172,8 @@ void WatTracer::tracer() {
 
         goodToGo_.get_future().get();
 
+        TRACE("CONTINUED tid=" << tid_);
+
         ptraceCmd(PTRACE_CONT, tid_, 0);
         handleSignals({SIGTERM}, {SIGINT});
 
@@ -199,7 +209,7 @@ void WatTracer::tracer() {
         std::unique_lock<std::mutex> lock(mutex_);
         isAlive_ = false;
     } catch (const std::exception& e) {
-        TRACE(">>> Oh no you don't! " << e.what());
+        std::cerr << ">>> Oh no you don't! " << e.what() << std::endl;
         std::unique_lock<std::mutex> lock(mutex_);
         isAlive_ = false;
         raise(SIGABRT);
@@ -269,6 +279,7 @@ bool WatTracer::onTraceeStatusChanged(int status) {
                     });
                     assert(WIFSTOPPED(status));
                     ptraceCmd(PTRACE_DETACH, newTid, 0);
+                    TRACE("DETACHED tid=" << newTid);
                     profiler_->newThread(newTid);
                 }
             break;
