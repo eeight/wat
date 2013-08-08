@@ -154,7 +154,7 @@ void WatTracer::tracer() {
             TRACE(">>> ATTACHED tid=" << tid_);
         } catch (...) {
             ready_.set_exception(std::current_exception());
-            std::unique_lock<std::mutex> mutex_;
+            std::unique_lock<std::mutex> lock(mutex_);
             isAlive_ = false;
             TRACE(">>> NOT ATTACHED tid=" << tid_);
             return;
