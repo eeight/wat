@@ -15,19 +15,6 @@
 #include <sys/syscall.h>
 #include <sys/wait.h>
 
-#include <iostream>
-
-std::mutex cerrmutex;
-
-#if 0
-#   define TRACE(...) do { \
-        std::unique_lock<std::mutex> llllock(cerrmutex); \
-        std::cerr << __VA_ARGS__ << std::endl; \
-    } while (false)
-#else
-#   define TRACE(...)
-#endif
-
 namespace {
 
 template <class F>
@@ -94,7 +81,6 @@ WatTracer::WatTracer(pid_t pid, pid_t tid, Profiler* profiler) :
         doDetach_(false),
         thread_([=] { tracer(); })
 {
-    TRACE("WAITING UNTIL tid=" << tid_ << " is attached");
     try {
         ready_.get_future().get();
     } catch (...) {
@@ -102,7 +88,6 @@ WatTracer::WatTracer(pid_t pid, pid_t tid, Profiler* profiler) :
         thread_.join();
         throw;
     }
-    TRACE("OK tid=" << tid_ << " is ready");
 }
 
 WatTracer::~WatTracer() {
@@ -128,7 +113,6 @@ std::future<std::vector<Frame>> WatTracer::stacktrace() {
     assert(!isStacktracePending_);
     isStacktracePending_ = true;
     stackPromise_ = std::promise<std::vector<Frame>>();
-    TRACE("STOPPING tid=" << tid_);
     convertThreadErrors([=] {
         throwErrnoIfMinus1RestartIfEintr([=] {
             return syscall(SYS_tgkill, pid_, tid_, SIGSTOP);
@@ -144,7 +128,6 @@ void WatTracer::tracer() {
         throwErrnoIfMinus1RestartIfEintr([&] {
             return syscall(SYS_tgkill, pid_, tid_, SIGSTOP);
         });
-        TRACE("WAITING FOR tid=" << tid_ << " to be detached");
     };
     try {
         try {
@@ -159,20 +142,16 @@ void WatTracer::tracer() {
                 assertStopped(status);
             }
             ptraceCmd(PTRACE_SETOPTIONS, tid_, PTRACE_O_TRACECLONE);
-            TRACE(">>> ATTACHED tid=" << tid_);
         } catch (...) {
             ready_.set_exception(std::current_exception());
             std::unique_lock<std::mutex> lock(mutex_);
             isAlive_ = false;
-            TRACE(">>> NOT ATTACHED tid=" << tid_);
             return;
         }
 
         ready_.set_value();
 
         goodToGo_.get_future().get();
-
-        TRACE("CONTINUED tid=" << tid_);
 
         ptraceCmd(PTRACE_CONT, tid_, 0);
         handleSignals({SIGTERM}, {SIGINT});
@@ -218,11 +197,9 @@ void WatTracer::tracer() {
 
 bool WatTracer::onTraceeStatusChanged(int status) {
     if (WIFEXITED(status)) {
-        TRACE(">>> THREAD tid=" << tid_ << " has finished");
         profiler_->endThread(tid_);
         return false;
     } else if (WIFSIGNALED(status)) {
-        TRACE(">>> THREAD tid=" << tid_ << " is terminated by a signal");
         profiler_->endThread(tid_);
         stackPromise_.set_exception(
                 std::make_exception_ptr(std::runtime_error(
@@ -232,7 +209,6 @@ bool WatTracer::onTraceeStatusChanged(int status) {
         return false;
     } else if (WIFSTOPPED(status)) {
         int deliveredSignal = WSTOPSIG(status);
-        TRACE(">>> THREAD tid=" << tid_ << " is stopped by " << strsignal(deliveredSignal));
         switch (deliveredSignal) {
             // group-stop
             case SIGSTOP:
@@ -241,16 +217,12 @@ bool WatTracer::onTraceeStatusChanged(int status) {
 
                     if (doDetach_) {
                         ptraceCmd(PTRACE_DETACH, tid_, 0);
-                        TRACE("DETACHED tid=" << tid_);
                         return false;
                     }
 
                     if (!isStacktracePending_) {
-                        TRACE("THIS CAN'T BE tid=" << tid_ << "; " <<
-                            "signal = " << strsignal(deliveredSignal));
                         deliveredSignal = 0;
                     } else {
-                        TRACE("GOTTEN STACKTRACE FOR " << tid_);
                         isStacktracePending_ = false;
                         stackPromise_.set_value(stacktraceImpl());
                         deliveredSignal = 0;
@@ -266,7 +238,6 @@ bool WatTracer::onTraceeStatusChanged(int status) {
                 break;
             case SIGTRAP:
                 if (status >> 16 == PTRACE_EVENT_CLONE) {
-                    TRACE(">>> THREAD tid=" << tid_ << " has spawned a new thread");
                     deliveredSignal = 0;
                     long newTid;
                     // The newly created thread starts in stopped state.
@@ -279,7 +250,6 @@ bool WatTracer::onTraceeStatusChanged(int status) {
                     });
                     assert(WIFSTOPPED(status));
                     ptraceCmd(PTRACE_DETACH, newTid, 0);
-                    TRACE("DETACHED tid=" << newTid);
                     profiler_->newThread(newTid);
                 }
             break;
