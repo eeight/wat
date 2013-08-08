@@ -40,6 +40,7 @@ private:
     std::mutex mutex_;
     bool isAlive_;
     bool isStacktracePending_;
+    bool doDetach_;
 };
 
 class Wat {

@@ -70,7 +70,8 @@ WatTracer::WatTracer(pid_t pid, pid_t tid, Profiler* profiler) :
         unwindInfo_(throwUnwindIf0(_UPT_create(tid_))),
         thread_([=] { tracer(); }),
         isAlive_(true),
-        isStacktracePending_(false)
+        isStacktracePending_(false),
+        doDetach_(false)
 {
     TRACE("WAITING UNTIL tid=" << tid_ << " is ready");
     try {
@@ -118,6 +119,12 @@ std::future<std::vector<Frame>> WatTracer::stacktrace() {
 }
 
 void WatTracer::tracer() {
+    auto handleSigterm = [&] {
+        std::unique_lock<std::mutex> lock(mutex_);
+        doDetach_ = true;
+        throwErrnoIfMinus1(syscall(SYS_tgkill, pid_, tid_, SIGSTOP));
+        TRACE("WAITING FOR tid=" << tid_ << " to be detached");
+    };
     try {
         try {
             ptraceCmd(PTRACE_ATTACH, tid_, 0);
@@ -146,14 +153,12 @@ void WatTracer::tracer() {
         handleSignals({SIGTERM}, {SIGINT});
 
         for (;;) {
-            int status;
             if (lastSignal() == SIGTERM) {
-                std::unique_lock<std::mutex> lock(mutex_);
-                isAlive_ = false;
-                assert(!isStacktracePending_);
-                break;
+                handleSigterm();
             }
             resetLastSignal();
+
+            int status;
             pid_t tid = waitpid(tid_, &status, __WALL);
             if (tid == tid_) {
                 if (!onTraceeStatusChanged(status)) {
@@ -168,7 +173,8 @@ void WatTracer::tracer() {
                 continue;
             }
             if (lastSignal() == SIGTERM) {
-                break;
+                handleSigterm();
+                resetLastSignal();
             } else {
                 throw std::logic_error(str(boost::format(
                         "Unexpected signal received: tid=%d, signal=%d (%s)") %
@@ -207,6 +213,12 @@ bool WatTracer::onTraceeStatusChanged(int status) {
             case SIGSTOP:
                 {
                     std::unique_lock<std::mutex> lock(mutex_);
+
+                    if (doDetach_) {
+                        ptraceCmd(PTRACE_DETACH, tid_, 0);
+                        TRACE("DETACHED tid=" << tid_);
+                        return false;
+                    }
 
                     if (!isStacktracePending_) {
                         TRACE("THIS CAN'T BE tid=" << tid_ << "; " <<
