@@ -76,7 +76,8 @@ Profiler::Profiler(pid_t pid) :
 }
 
 Profiler::~Profiler() {
-    std::unique_lock<std::mutex> stoppingLock(stoppingMutex_);
+    std::unique_lock<std::mutex> stoppingNewThreads(skipNewThreadsMutex_);
+    std::unique_lock<std::mutex> stoppingEndedThreads(skipEndedThreadsMutex_);
     std::unique_lock<std::mutex> lock(mutex_);
     wats_.clear();
 }
@@ -112,7 +113,7 @@ void Profiler::eventLoop(Tracer* tracer, Heartbeat* heartbeat) {
 
 void Profiler::newThread(pid_t tid) {
     std::unique_lock<std::mutex> stoppingLock(
-            stoppingMutex_, std::try_to_lock);
+            skipNewThreadsMutex_, std::try_to_lock);
     if (!stoppingLock.owns_lock()) {
         return;
     }
@@ -130,7 +131,7 @@ void Profiler::newThread(pid_t tid) {
 
 void Profiler::endThread(pid_t tid) {
     std::unique_lock<std::mutex> stoppingLock(
-            stoppingMutex_, std::try_to_lock);
+            skipEndedThreadsMutex_, std::try_to_lock);
     if (!stoppingLock.owns_lock()) {
         return;
     }

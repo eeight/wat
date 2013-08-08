@@ -29,6 +29,7 @@ private:
     std::map<pid_t, Wat> wats_;
     std::vector<pid_t> zombies_;
     std::mutex mutex_;
-    std::mutex stoppingMutex_;
+    std::mutex skipNewThreadsMutex_;
+    std::mutex skipEndedThreadsMutex_;
 };
 
