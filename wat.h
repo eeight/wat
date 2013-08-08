@@ -40,12 +40,13 @@ private:
     std::promise<std::vector<Frame>> stackPromise_;
     std::promise<void> ready_;
     std::promise<void> goodToGo_;
-    std::thread thread_;
 
     std::mutex mutex_;
     bool isAlive_;
     bool isStacktracePending_;
     bool doDetach_;
+
+    std::thread thread_;
 };
 
 class Wat {

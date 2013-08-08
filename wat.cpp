@@ -81,10 +81,10 @@ WatTracer::WatTracer(pid_t pid, pid_t tid, Profiler* profiler) :
                 throwUnwindIf0(unw_create_addr_space(&_UPT_accessors, 0)),
                 &unw_destroy_addr_space),
         unwindInfo_(throwUnwindIf0(_UPT_create(tid_)), &_UPT_destroy),
-        thread_([=] { tracer(); }),
         isAlive_(true),
         isStacktracePending_(false),
-        doDetach_(false)
+        doDetach_(false),
+        thread_([=] { tracer(); })
 {
     TRACE("WAITING UNTIL tid=" << tid_ << " is ready");
     try {
