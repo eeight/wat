@@ -41,6 +41,16 @@ void convertThreadErrors(F f) {
     }
 }
 
+template <class F>
+void throwErrnoIfMinus1RestartIfEintr(F f) {
+    int ret;
+    do {
+        ret = f();
+    } while (ret == -1 && errno == EINTR);
+
+    throwErrnoIfMinus1(ret);
+}
+
 template <class T>
 int ptraceCmdNoThrow(__ptrace_request request, pid_t tid, T arg) {
     return ptrace(
@@ -50,7 +60,9 @@ int ptraceCmdNoThrow(__ptrace_request request, pid_t tid, T arg) {
 template <class T>
 void ptraceCmd(__ptrace_request request, pid_t tid, T arg) {
     convertThreadErrors([=] {
-        throwErrnoIfMinus1(ptraceCmdNoThrow(request, tid, arg));
+        throwErrnoIfMinus1RestartIfEintr([=] {
+            return ptraceCmdNoThrow(request, tid, arg);
+        });
     });
 }
 
@@ -90,8 +102,9 @@ WatTracer::~WatTracer() {
         std::unique_lock<std::mutex> lock(mutex_);
 
         if (isAlive_) {
-            throwErrnoIfMinus1(
-                    pthread_kill(thread_.native_handle(), SIGTERM));
+            throwErrnoIfMinus1RestartIfEintr([&] {
+                return pthread_kill(thread_.native_handle(), SIGTERM);
+            });
         }
     }
 
@@ -109,7 +122,9 @@ std::future<std::vector<Frame>> WatTracer::stacktrace() {
     stackPromise_ = std::promise<std::vector<Frame>>();
     TRACE("STOPPING tid=" << tid_);
     convertThreadErrors([=] {
-        throwErrnoIfMinus1(syscall(SYS_tgkill, pid_, tid_, SIGSTOP));
+        throwErrnoIfMinus1RestartIfEintr([=] {
+            return syscall(SYS_tgkill, pid_, tid_, SIGSTOP);
+        });
     });
     return stackPromise_.get_future();
 }
@@ -118,14 +133,18 @@ void WatTracer::tracer() {
     auto handleSigterm = [&] {
         std::unique_lock<std::mutex> lock(mutex_);
         doDetach_ = true;
-        throwErrnoIfMinus1(syscall(SYS_tgkill, pid_, tid_, SIGSTOP));
+        throwErrnoIfMinus1RestartIfEintr([&] {
+            return syscall(SYS_tgkill, pid_, tid_, SIGSTOP);
+        });
         TRACE("WAITING FOR tid=" << tid_ << " to be detached");
     };
     try {
         try {
             ptraceCmd(PTRACE_ATTACH, tid_, 0);
             int status;
-            throwErrnoIfMinus1(waitpid(tid_, &status, __WALL));
+            throwErrnoIfMinus1RestartIfEintr([&] {
+                return waitpid(tid_, &status, __WALL);
+            });
             if (WIFEXITED(status)) {
                 throw ThreadIsGone();
             } else {
@@ -245,7 +264,9 @@ bool WatTracer::onTraceeStatusChanged(int status) {
                     // thread which will handle this thread tracing.
                     ptraceCmd(PTRACE_GETEVENTMSG, tid_, &newTid);
                     int status;
-                    throwErrnoIfMinus1(waitpid(newTid, &status, __WALL));
+                    throwErrnoIfMinus1RestartIfEintr([&] {
+                        return waitpid(newTid, &status, __WALL);
+                    });
                     assert(WIFSTOPPED(status));
                     ptraceCmd(PTRACE_DETACH, newTid, 0);
                     profiler_->newThread(newTid);
