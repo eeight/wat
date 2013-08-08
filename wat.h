@@ -9,21 +9,20 @@
 #include <unistd.h>
 
 class Profiler;
+class Wat;
+class StoppedWat;
 
-class Wat {
+class WatTracer {
 public:
-    Wat(pid_t pid, pid_t tid, Profiler* profiler);
-
-    ~Wat();
-
-    Wat(const Wat&) = delete;
-    void operator =(const Wat&) = delete;
-    Wat(Wat&&) = delete;
-    void operator =(Wat&&) = delete;
-
-    std::future<std::vector<Frame>> stacktrace();
+    ~WatTracer();
 
 private:
+    WatTracer(pid_t pid, pid_t tid, Profiler* profiler);
+    std::future<std::vector<Frame>> stacktrace();
+
+    friend class Wat;
+    friend class StoppedWat;
+
     void tracer();
     bool onTraceeStatusChanged(int status);
     std::vector<Frame> stacktraceImpl();
@@ -35,9 +34,38 @@ private:
     void *unwindInfo_;
     std::promise<std::vector<Frame>> stackPromise_;
     std::promise<void> ready_;
+    std::promise<void> goodToGo_;
     std::thread thread_;
 
     std::mutex mutex_;
     bool isAlive_;
     bool isStacktracePending_;
+};
+
+class Wat {
+public:
+    explicit Wat(std::unique_ptr<WatTracer> tracer);
+
+    std::future<std::vector<Frame>> stacktrace() {
+        return tracer_->stacktrace();
+    }
+
+    Wat(Wat&&) = default;
+    Wat& operator=(Wat&&) = default;
+
+private:
+    std::unique_ptr<WatTracer> tracer_;
+};
+
+class StoppedWat {
+public:
+    StoppedWat(pid_t pid, pid_t tid, Profiler* profiler);
+
+    Wat continueWat() && { return Wat(std::move(tracer_)); }
+
+    StoppedWat(StoppedWat&&) = default;
+    StoppedWat& operator=(StoppedWat&&) = default;
+
+private:
+    std::unique_ptr<WatTracer> tracer_;
 };

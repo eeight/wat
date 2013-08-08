@@ -15,7 +15,22 @@
 #include <sys/syscall.h>
 #include <sys/wait.h>
 
+#include <iostream>
+
 namespace {
+
+template <class F>
+void convertThreadErrors(F f) {
+    try {
+        f();
+    } catch (const SyscallError& e) {
+        if (e.error() == ESRCH || e.error() == EPERM) {
+            throw ThreadIsGone();
+        } else {
+            throw;
+        }
+    }
+}
 
 template <class T>
 int ptraceCmdNoThrow(__ptrace_request request, pid_t tid, T arg) {
@@ -25,7 +40,9 @@ int ptraceCmdNoThrow(__ptrace_request request, pid_t tid, T arg) {
 
 template <class T>
 void ptraceCmd(__ptrace_request request, pid_t tid, T arg) {
-    throwErrnoIfMinus1(ptraceCmdNoThrow(request, tid, arg));
+    convertThreadErrors([=] {
+        throwErrnoIfMinus1(ptraceCmdNoThrow(request, tid, arg));
+    });
 }
 
 void assertStopped(int status) {
@@ -35,21 +52,29 @@ void assertStopped(int status) {
 
 } // namespace
 
-Wat::Wat(pid_t pid, pid_t tid, Profiler* profiler) :
+WatTracer::WatTracer(pid_t pid, pid_t tid, Profiler* profiler) :
         pid_(pid),
         tid_(tid),
         profiler_(profiler),
         addressSpace_(throwUnwindIf0(
                 unw_create_addr_space(&_UPT_accessors, 0))),
-        unwindInfo_(throwUnwindIf0(_UPT_create(tid))),
+        unwindInfo_(throwUnwindIf0(_UPT_create(tid_))),
         thread_([=] { tracer(); }),
         isAlive_(true),
         isStacktracePending_(false)
 {
-    ready_.get_future().wait();
+    //std::cerr << "WAITING UNTIL tid=" << tid_ << " is ready\n";
+    try {
+        ready_.get_future().get();
+    } catch (...) {
+        // Prevent thread leak
+        thread_.join();
+        throw;
+    }
+    //std::cerr << "OK tid=" << tid_ << " is ready\n";
 }
 
-Wat::~Wat() {
+WatTracer::~WatTracer() {
     {
         std::unique_lock<std::mutex> lock(mutex_);
 
@@ -67,7 +92,7 @@ Wat::~Wat() {
     }
 }
 
-std::future<std::vector<Frame>> Wat::stacktrace() {
+std::future<std::vector<Frame>> WatTracer::stacktrace() {
     std::unique_lock<std::mutex> lock(mutex_);
     if (!isAlive_) {
         throw std::runtime_error(
@@ -76,69 +101,87 @@ std::future<std::vector<Frame>> Wat::stacktrace() {
     assert(!isStacktracePending_);
     isStacktracePending_ = true;
     stackPromise_ = std::promise<std::vector<Frame>>();
-    throwErrnoIfMinus1(syscall(SYS_tgkill, pid_, tid_, SIGSTOP));
+    //std::cerr << "STOPPING tid=" << tid_ << "\n";
+    convertThreadErrors([=] {
+        throwErrnoIfMinus1(syscall(SYS_tgkill, pid_, tid_, SIGSTOP));
+    });
     return stackPromise_.get_future();
 }
 
-void Wat::tracer() {
-    const int ptraceRet = ptraceCmdNoThrow(PTRACE_ATTACH, tid_, 0);
-    if (ptraceRet == -1) {
-        if (errno == ESRCH) {
-            std::unique_lock<std::mutex> lock(mutex_);
-            if (isStacktracePending_) {
-                std::make_exception_ptr(std::runtime_error(
-                        "Cannot attach thread: it has terminated already"));
+void WatTracer::tracer() {
+    try {
+        try {
+            ptraceCmd(PTRACE_ATTACH, tid_, 0);
+            int status;
+            throwErrnoIfMinus1(waitpid(tid_, &status, __WALL));
+            if (WIFEXITED(status)) {
+                throw ThreadIsGone();
+            } else {
+                assertStopped(status);
             }
+            ptraceCmd(PTRACE_SETOPTIONS, tid_, PTRACE_O_TRACECLONE);
+            //std::cerr << ">>> ATTACHED tid=" << tid_ << "\n";
+        } catch (...) {
+            ready_.set_exception(std::current_exception());
+            std::unique_lock<std::mutex> mutex_;
             isAlive_ = false;
+            //std::cerr << ">>> NOT ATTACHED tid=" << tid_ << "\n";
             return;
-        } else {
-            throwErrno();
         }
-    }
 
-    int status;
-    throwErrnoIfMinus1(waitpid(tid_, &status, __WALL));
-    assertStopped(status);
-    ptraceCmd(PTRACE_SETOPTIONS, tid_, PTRACE_O_TRACECLONE);
-    ptraceCmd(PTRACE_CONT, tid_, 0);
-    handleSignals({SIGTERM}, {SIGINT});
-    ready_.set_value();
-    for (;;) {
-        int status;
-        if (lastSignal() == SIGTERM) {
-            std::unique_lock<std::mutex> lock(mutex_);
-            isAlive_ = false;
-            break;
-        }
-        resetLastSignal();
-        pid_t tid = waitpid(tid_, &status, __WALL);
-        if (tid == tid_) {
-            if (!onTraceeStatusChanged(status)) {
+        ready_.set_value();
+
+        goodToGo_.get_future().get();
+
+        ptraceCmd(PTRACE_CONT, tid_, 0);
+        handleSignals({SIGTERM}, {SIGINT});
+
+        for (;;) {
+            int status;
+            if (lastSignal() == SIGTERM) {
+                std::unique_lock<std::mutex> lock(mutex_);
+                isAlive_ = false;
                 break;
             }
-            continue;
+            resetLastSignal();
+            pid_t tid = waitpid(tid_, &status, __WALL);
+            if (tid == tid_) {
+                if (!onTraceeStatusChanged(status)) {
+                    break;
+                }
+                continue;
+            }
+            if (errno != EINTR) {
+                throwErrnoIfMinus1(tid);
+            }
+            if (!lastSignal()) {
+                continue;
+            }
+            if (lastSignal() == SIGTERM) {
+                break;
+            } else {
+                throw std::logic_error(str(boost::format(
+                        "Unexpected signal received: tid=%d, signal=%d (%s)") %
+                                tid_ % lastSignal()% strsignal(lastSignal())));
+            }
         }
-        if (errno != EINTR) {
-            throwErrnoIfMinus1(tid);
-        }
-        if (!lastSignal()) {
-            continue;
-        }
-        if (lastSignal() == SIGTERM) {
-            break;
-        } else {
-            throw std::logic_error(str(boost::format(
-                    "Unexpected signal received: tid=%d, signal=%d (%s)") %
-                            tid_ % lastSignal()% strsignal(lastSignal())));
-        }
+        std::unique_lock<std::mutex> lock(mutex_);
+        isAlive_ = false;
+    } catch (const std::exception& e) {
+        //std::cerr << ">>> Oh no you don't! " << e.what() << std::endl;
+        std::unique_lock<std::mutex> lock(mutex_);
+        isAlive_ = false;
+        raise(SIGABRT);
     }
 }
 
-bool Wat::onTraceeStatusChanged(int status) {
+bool WatTracer::onTraceeStatusChanged(int status) {
     if (WIFEXITED(status)) {
+        //std::cerr << ">>> THREAD tid=" << tid_ << " has finished\n";
         profiler_->endThread(tid_);
         return false;
     } else if (WIFSIGNALED(status)) {
+        //std::cerr << ">>> THREAD tid=" << tid_ << " is terminated by a signal\n";
         profiler_->endThread(tid_);
         stackPromise_.set_exception(
                 std::make_exception_ptr(std::runtime_error(
@@ -147,6 +190,7 @@ bool Wat::onTraceeStatusChanged(int status) {
                             WTERMSIG(status)))));
         return false;
     } else if (WIFSTOPPED(status)) {
+        //std::cerr << ">>> THREAD tid=" << tid_ << " is stopped by a signal\n";
         int deliveredSignal = WSTOPSIG(status);
         switch (deliveredSignal) {
             // group-stop
@@ -154,15 +198,23 @@ bool Wat::onTraceeStatusChanged(int status) {
             case SIGTSTP:
             case SIGTTOU:
             case SIGTTIN:
-                stackPromise_.set_value(stacktraceImpl());
                 {
                     std::unique_lock<std::mutex> lock(mutex_);
-                    isStacktracePending_ = false;
+
+                    if (!isStacktracePending_) {
+                        //std::cerr << "THIS CAN'T BE tid=" << tid_ << "; " <<
+                            //"signal = " << strsignal(deliveredSignal) << "\n";
+                    } else {
+                        //std::cerr << "GOTTEN STACKTRACE FOR " << tid_ << "\n";
+                        isStacktracePending_ = false;
+                        stackPromise_.set_value(stacktraceImpl());
+                        deliveredSignal = 0;
+                    }
                 }
-                deliveredSignal = 0;
             break;
             case SIGTRAP:
                 if (status >> 16 == PTRACE_EVENT_CLONE) {
+                    //std::cerr << ">>> THREAD tid=" << tid_ << " has spawned a new thread\n";
                     deliveredSignal = 0;
                     long newTid;
                     ptraceCmd(PTRACE_GETEVENTMSG, tid_, &newTid);
@@ -183,7 +235,7 @@ bool Wat::onTraceeStatusChanged(int status) {
     return true;
 }
 
-std::vector<Frame> Wat::stacktraceImpl() {
+std::vector<Frame> WatTracer::stacktraceImpl() {
     std::vector<Frame> stacktrace;
 
     unw_cursor_t cursor;
@@ -206,4 +258,15 @@ std::vector<Frame> Wat::stacktraceImpl() {
     } while (unw_step(&cursor) > 0);
 
     return stacktrace;
+}
+
+StoppedWat::StoppedWat(pid_t pid, pid_t tid, Profiler* profiler) :
+    tracer_(std::unique_ptr<WatTracer>(new WatTracer(pid, tid, profiler)))
+{
+}
+
+Wat::Wat(std::unique_ptr<WatTracer> tracer) :
+    tracer_(std::move(tracer))
+{
+    tracer_->goodToGo_.set_value();
 }

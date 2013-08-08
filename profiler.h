@@ -5,7 +5,6 @@
 #include "wat.h"
 
 #include <map>
-#include <memory>
 #include <mutex>
 #include <vector>
 
@@ -14,11 +13,12 @@
 class Profiler {
 public:
     explicit Profiler(pid_t pid);
+    ~Profiler();
 
     void eventLoop(Tracer* tracer, Heartbeat* heartbeat);
 
 private:
-    friend class Wat;
+    friend class WatTracer;
     void newThread(pid_t tid);
     void endThread(pid_t tid);
 
@@ -26,7 +26,8 @@ private:
     void reapDead();
 
     pid_t pid_;
-    std::map<pid_t, std::unique_ptr<Wat>> wats_;
+    bool isStopping_;
+    std::map<pid_t, Wat> wats_;
     std::vector<pid_t> zombies_;
     std::mutex mutex_;
 };

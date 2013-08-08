@@ -10,6 +10,8 @@
 
 #include <unistd.h>
 
+#include <iostream>
+
 using boost::filesystem::directory_iterator;
 
 namespace {
@@ -26,18 +28,21 @@ void forallTids(pid_t pid, F f) {
     }
 }
 
-std::map<pid_t, std::unique_ptr<Wat>> attachAllThreads(
-        Profiler* profiler, pid_t pid) {
+std::map<pid_t, StoppedWat> attachAllThreads(pid_t pid, Profiler* profiler) {
     bool tracedSomething = true;
-    std::map<pid_t, std::unique_ptr<Wat>> wats;
+    std::map<pid_t, StoppedWat> wats;
 
     while (tracedSomething) {
         tracedSomething = false;
         forallTids(pid, [&](pid_t tid) {
             if (!wats.count(tid)) {
                 tracedSomething = true;
-                wats.emplace(
-                    tid, std::unique_ptr<Wat>(new Wat(pid, tid, profiler)));
+                try {
+                    wats.emplace(tid, StoppedWat(pid, tid, profiler));
+                } catch (const ThreadIsGone&) {
+                    //std::cerr << ">>> OH, IT'S TOO FAST\n";
+                    // Tough luck, moving on.
+                }
             }
         });
     }
@@ -60,8 +65,21 @@ std::set<typename Container::key_type> keys(const Container& container) {
 
 Profiler::Profiler(pid_t pid) :
     pid_(pid),
-    wats_(attachAllThreads(this, pid))
-{}
+    isStopping_(false)
+{
+    auto stoppedWats = attachAllThreads(pid, this);
+    //std::cerr << ">>> ATTACHED " << stoppedWats.size() << " threads\n";
+
+    std::unique_lock<std::mutex> lock(mutex_);
+    for (auto& pair: stoppedWats) {
+        wats_.emplace(pair.first, std::move(pair.second).continueWat());
+    }
+}
+
+Profiler::~Profiler() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    isStopping_ = true;
+}
 
 void Profiler::eventLoop(Tracer* tracer, Heartbeat* heartbeat) {
     doStacktraces(tracer);
@@ -93,17 +111,30 @@ void Profiler::eventLoop(Tracer* tracer, Heartbeat* heartbeat) {
 }
 
 void Profiler::newThread(pid_t tid) {
-    std::unique_lock<std::mutex> lock(mutex_);
-    wats_.emplace(tid, std::unique_ptr<Wat>(new Wat(pid_, tid, this)));
+    try {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (isStopping_) {
+            return;
+        }
+        lock.unlock();
+        StoppedWat stoppedWat(pid_, tid, this);
+
+        lock.lock();
+        //std::cerr << "new: tid=" << tid << "\n";
+        //std::cerr << "size(wats): " << wats_.size() << "\n";
+        wats_.emplace(tid, std::move(stoppedWat).continueWat());
+    } catch (const ThreadIsGone&) {
+    }
 }
 
 void Profiler::endThread(pid_t tid) {
     std::unique_lock<std::mutex> lock(mutex_);
+    //std::cerr << "dead: tid=" << tid << "\n";
+    //std::cerr << "size(wats): " << wats_.size() << "\n";
     zombies_.push_back(tid);
 }
 
 void Profiler::reapDead() {
-    std::unique_lock<std::mutex> lock(mutex_);
     for (pid_t zombie: zombies_) {
         wats_.erase(zombie);
     }
@@ -114,14 +145,16 @@ void Profiler::doStacktraces(Tracer* tracer) {
     std::map<pid_t, std::future<std::vector<Frame>>> stacktraceFutures;
     {
         std::unique_lock<std::mutex> lock(mutex_);
+        //std::cerr << ">>> TRYTING TO OBTAIN STACKTRACES for " << wats_.size() << " threads\n";
         for (auto& kv: wats_) {
             try {
-                stacktraceFutures.emplace(kv.first, kv.second->stacktrace());
+                stacktraceFutures.emplace(kv.first, kv.second.stacktrace());
             } catch (const std::exception& e) {
                 tracer->addInfoLine(std::string("Exception: ") + e.what());
             }
         }
     }
+    //std::cerr << ">>> OBTAINING STACKTRACES for " << stacktraceFutures.size() << " threads\n";
     std::map<pid_t, std::vector<Frame>> stacktraces;
     for (auto& kv: stacktraceFutures) {
         try {
